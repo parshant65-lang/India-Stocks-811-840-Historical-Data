@@ -74,6 +74,14 @@ def fetch_and_save_company(symbol, company_name, default_ticker):
 
         epoch_ms = int(ts_utc.timestamp() * 1000)
         dt_utc_str = ts_utc.strftime("%Y-%m-%d %H:%M:%S")
+
+        raw_vol = row.get("Volume", 0)
+        try:
+            vol_int = int(round(float(raw_vol))) if pd.notna(raw_vol) else 0
+            vol_int = max(0, vol_int)
+        except Exception:
+            vol_int = 0
+
         rows.append({
             "timestamp": epoch_ms,
             "datetime_utc": dt_utc_str,
@@ -81,7 +89,7 @@ def fetch_and_save_company(symbol, company_name, default_ticker):
             "high": round(float(row["High"]), 4),
             "low": round(float(row["Low"]), 4),
             "close": round(float(row["Close"]), 4),
-            "volume": int(row["Volume"]),
+            "volume": vol_int,
             "date_utc": ts_utc.strftime("%Y-%m-%d")
         })
 
@@ -96,32 +104,55 @@ def fetch_and_save_company(symbol, company_name, default_ticker):
         csv_path = os.path.join(folder, f"{symbol}_1m_{date_str}.csv")
 
         to_write = group[HEADERS].copy()
+        to_write["volume"] = pd.to_numeric(to_write["volume"], errors="coerce").fillna(0).astype("int64")
+        to_write["timestamp"] = pd.to_numeric(to_write["timestamp"], errors="coerce").astype("int64")
+
         if os.path.exists(csv_path):
             existing = pd.read_csv(csv_path)
             combined = pd.concat([existing, to_write], ignore_index=True)
-            combined = combined.drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
-            combined.to_csv(csv_path, index=False)
+            combined = combined.drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp")
+            combined["volume"] = pd.to_numeric(combined["volume"], errors="coerce").fillna(0).astype("int64")
+            combined["timestamp"] = pd.to_numeric(combined["timestamp"], errors="coerce").astype("int64")
+            for c in ["open", "high", "low", "close"]:
+                if c in combined.columns:
+                    combined[c] = combined[c].round(4)
+            combined[HEADERS].to_csv(csv_path, index=False)
             total_candles += len(combined)
         else:
             to_write = to_write.sort_values("timestamp")
-            to_write.to_csv(csv_path, index=False)
+            to_write[HEADERS].to_csv(csv_path, index=False)
             total_candles += len(to_write)
-
-    # Symbol README
-    sym_dir = os.path.join(symbol, "1m")
-    os.makedirs(sym_dir, exist_ok=True)
-    with open(os.path.join(sym_dir, "README.md"), "w") as f:
-        f.write(f"# {symbol} - 1-Minute Historical Kline Data\n\n")
-        f.write(f"- **Company Name:** {company_name}\n")
-        f.write(f"- **Symbol:** `{symbol}`\n")
-        f.write(f"- **Candle Interval:** 1-Minute (`1m`)\n")
-        f.write(f"- **Directory Structure:** `<SYMBOL>/1m/<YYYY>/<MM>/<SYMBOL>_1m_<YYYY-MM-DD>.csv`\n")
-        f.write(f"- **Schema:** `timestamp,datetime_utc,open,high,low,close,volume`\n")
 
     return True, total_candles
 
+def sanitize_existing_csvs():
+    for root, dirs, files in os.walk("."):
+        for f in files:
+            if f.endswith(".csv") and "_1m_" in f:
+                p = os.path.join(root, f)
+                try:
+                    df = pd.read_csv(p)
+                    if "volume" in df.columns:
+                        needs_clean = False
+                        if df["volume"].dtype != "int64":
+                            needs_clean = True
+                        elif df["volume"].astype(str).str.contains(r"\.[0-9]+$", regex=True).any():
+                            needs_clean = True
+                        
+                        if needs_clean:
+                            df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype("int64")
+                            df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce").astype("int64")
+                            for c in ["open", "high", "low", "close"]:
+                                if c in df.columns:
+                                    df[c] = df[c].round(4)
+                            df = df.drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp")
+                            df[HEADERS].to_csv(p, index=False)
+                except Exception:
+                    pass
+
 def main():
     print("Starting automated ingestion for batch...")
+    sanitize_existing_csvs()
     success_count = 0
     total_candles = 0
     for symbol, (cname, ticker) in COMPANIES.items():
